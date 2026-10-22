@@ -1,0 +1,4 @@
+aiogram==3.31.0
+telethon==1.45.0
+curl_cffi==0.16.3
+pydantic-settings==2.16.1

@@ -1,0 +1,15 @@
+[Unit]
+Description=autoprsrnft - NFT gifts arbitrage bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autoprsrnft
+WorkingDirectory=/opt/autoprsrnft
+ExecStart=/opt/autoprsrnft/.venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
