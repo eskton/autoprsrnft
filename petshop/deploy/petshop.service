@@ -1,0 +1,15 @@
+[Unit]
+Description=petshop - pets and game top-up shop (Telegram bot + mini app)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autoprsrnft
+WorkingDirectory=/opt/autoprsrnft/petshop
+ExecStart=/opt/autoprsrnft/petshop/.venv/bin/python -m shop.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
