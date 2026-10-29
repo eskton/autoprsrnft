@@ -40,17 +40,23 @@ def nft_slug(collection: str, number: int | None) -> str | None:
 
 @dataclass(frozen=True)
 class GiftKey:
-    """Что сравниваем между биржами: коллекция + (необязательно) модель."""
+    """Что сравниваем между биржами: коллекция + (необязательно) модель и/или фон."""
 
     collection: str
     model: str | None = None
+    backdrop: str | None = None
 
     @property
     def id(self) -> str:
-        return f"{norm(self.collection)}|{norm(self.model or '')}"
+        return f"{norm(self.collection)}|{norm(self.model or '')}|{norm(self.backdrop or '')}"
 
     def __str__(self) -> str:
-        return f"{self.collection} — {self.model}" if self.model else self.collection
+        parts = [self.collection]
+        if self.model:
+            parts.append(self.model)
+        if self.backdrop:
+            parts.append(f"фон {self.backdrop}")
+        return " — ".join(parts)
 
 
 @dataclass
@@ -70,7 +76,13 @@ class Listing:
 
     @property
     def key(self) -> GiftKey:
+        """Для сравнения по модели."""
         return GiftKey(self.collection, self.model)
+
+    @property
+    def backdrop_key(self) -> GiftKey | None:
+        """Для сравнения по фону (любая модель той же коллекции)."""
+        return GiftKey(self.collection, backdrop=self.backdrop) if self.backdrop else None
 
     @property
     def nft_url(self) -> str | None:

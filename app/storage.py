@@ -6,17 +6,33 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+MODES = {"model": "по модели", "backdrop": "по фону", "both": "по модели и по фону"}
+
+
 @dataclass
 class UserSettings:
     alerts: bool = True
+    # Сравнение по модели: шлём, если перепродажа даёт столько профита
     min_profit_ton: float = 1.0
     min_profit_pct: float = 5.0
     max_buy_ton: float = 0.0  # 0 = без лимита
+    # model / backdrop / both
+    mode: str = "both"
+    # Сравнение по фону: шлём, если лот дешевле флора того же фона на столько %
+    min_discount_pct: float = 10.0
 
-    def accepts(self, profit: float, pct: float, buy_cost: float) -> bool:
-        if not self.alerts or profit < self.min_profit_ton or pct < self.min_profit_pct:
+    def wants(self, basis: str) -> bool:
+        return self.alerts and self.mode in (basis, "both")
+
+    def accepts(self, op) -> bool:
+        """op — app.arbitrage.Opportunity."""
+        if not self.wants(op.basis):
             return False
-        return not self.max_buy_ton or buy_cost <= self.max_buy_ton
+        if self.max_buy_ton and op.buy.buy_cost > self.max_buy_ton:
+            return False
+        if op.basis == "backdrop":
+            return op.discount_pct >= self.min_discount_pct
+        return op.profit >= self.min_profit_ton and op.pct >= self.min_profit_pct
 
 
 class Storage:

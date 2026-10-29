@@ -89,6 +89,14 @@ class Tonnel(Market):
         flt = base_filter()
         name = canon(key.collection)
         flt["gift_name"] = "Jack-in-the-Box" if name.lower() == "jack-in-the-box" else name
+        # Tonnel хранит атрибуты с редкостью: 'Onyx Black (1%)', поэтому ищем по началу строки
         if key.model:
-            flt["model"] = {"$regex": f"^{re.escape(canon(key.model))} \\("}
+            flt["model"] = {"$regex": f"^{_rx(canon(key.model))} \\("}
+        if key.backdrop:
+            flt["backdrop"] = {"$regex": f"^{_rx(canon(key.backdrop))} \\("}
         return await self._page(flt, SORT_PRICE, limit)
+
+
+def _rx(text: str) -> str:
+    """Экранирует спецсимволы регулярки, но не пробелы (как в проверенном клиенте tonnelmp)."""
+    return re.sub(r"([.^$*+?{}\[\]\\|()])", r"\\\1", text)

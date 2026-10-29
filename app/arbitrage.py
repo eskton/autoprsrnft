@@ -13,13 +13,19 @@ log = logging.getLogger(__name__)
 
 Quotes = dict[str, "list[Listing] | Exception"]
 
+# «… фон Onyx Black», «… bg: Black», «… backdrop Black» в конце запроса
+_BACKDROP_RE = re.compile(r"(?:^|[\s|/,;])(?:фон|bg|backdrop)(?:\s*:\s*|\s+)(.+)$", re.IGNORECASE)
+
 
 @dataclass
 class Opportunity:
     key: GiftKey
     buy: Listing
-    sell: Listing  # лот-ориентир (флор) на бирже, где продаём
+    sell: Listing  # лот-ориентир на бирже, где выгоднее всего продать
+    floor: Listing  # самый дешёвый другой такой же лот на всех биржах
+    others: int  # сколько других таких лотов нашли (до 3 на биржу)
     quotes: Quotes
+    basis: str = "model"  # model — сравнение по модели, backdrop — по фону
 
     @property
     def sell_net(self) -> float:
@@ -33,8 +39,15 @@ class Opportunity:
     def pct(self) -> float:
         return self.profit / self.buy.buy_cost * 100 if self.buy.buy_cost else 0.0
 
+    @property
+    def discount_pct(self) -> float:
+        """На сколько % лот дешевле флора (цены покупки с комиссиями)."""
+        if not self.floor.buy_cost:
+            return 0.0
+        return (self.floor.buy_cost - self.buy.buy_cost) / self.floor.buy_cost * 100
 
-def best_deal(key: GiftKey, quotes: Quotes, buy: Listing | None = None) -> Opportunity | None:
+
+def best_deal(key: GiftKey, quotes: Quotes, buy: Listing | None = None, basis: str = "model") -> Opportunity | None:
     """Где купить дешевле всего и где выгоднее всего продать.
 
     buy — конкретный лот (например, только что выставленный). Если не задан,
@@ -49,14 +62,21 @@ def best_deal(key: GiftKey, quotes: Quotes, buy: Listing | None = None) -> Oppor
             return None
         buy = min(candidates, key=lambda x: x.buy_cost)
 
-    best_sell: Listing | None = None
-    for market, listings in ok.items():
-        ref = next((x for x in listings if not (x.market == buy.market and x.id == buy.id)), None)
-        if ref and (best_sell is None or ref.seller_net > best_sell.seller_net):
-            best_sell = ref
-    if best_sell is None:
+    def same(x: Listing) -> bool:
+        return x.market == buy.market and x.id == buy.id
+
+    refs = [ref for ls in ok.values() if (ref := next((x for x in ls if not same(x)), None))]
+    if not refs:
         return None
-    return Opportunity(key=key, buy=buy, sell=best_sell, quotes=quotes)
+    return Opportunity(
+        key=key,
+        buy=buy,
+        sell=max(refs, key=lambda x: x.seller_net),
+        floor=min(refs, key=lambda x: x.buy_cost),
+        others=sum(1 for ls in ok.values() for x in ls if not same(x)),
+        quotes=quotes,
+        basis=basis,
+    )
 
 
 class Arbitrage:
@@ -65,9 +85,10 @@ class Arbitrage:
         self.floor_ttl = floor_ttl
         self._cache: dict[tuple[str, str], tuple[float, list[Listing]]] = {}
         self._inflight: dict[tuple[str, str], asyncio.Task] = {}
-        # Точные названия коллекций/моделей, подсмотренные в лотах: norm -> как пишет биржа
+        # Точные названия, подсмотренные в лотах: norm -> как пишет биржа
         self.collections: dict[str, str] = {}
         self.models: dict[str, dict[str, str]] = {}
+        self.backdrops: dict[str, str] = {}  # фоны общие для всех коллекций
 
     def learn(self, listings: list[Listing]) -> None:
         for x in listings:
@@ -77,14 +98,27 @@ class Arbitrage:
             self.collections.setdefault(c, x.collection)
             if x.model:
                 self.models.setdefault(c, {}).setdefault(norm(x.model), x.model)
+            if x.backdrop:
+                self.backdrops.setdefault(norm(x.backdrop), x.backdrop)
 
     def resolve(self, text: str) -> GiftKey | None:
-        """'plush pepe | cozy galaxy' / 'Plush Pepe, Cozy Galaxy' / 'plush pepe' -> GiftKey."""
-        parts = [p.strip() for p in re.split(r"[|/,;]", text, maxsplit=1)]
-        if not parts or not parts[0]:
+        """Разбирает запрос пользователя:
+        'plush pepe' / 'Plush Pepe | Cozy Galaxy' / 'Plush Pepe Cozy Galaxy'
+        'Toy Bear фон Onyx Black' / 'Toy Bear | Wizard | Onyx Black'.
+        """
+        text = text.strip()
+        backdrop = None
+        m = _BACKDROP_RE.search(text)
+        if m:
+            backdrop = m.group(1).strip(" |/,;") or None
+            text = text[: m.start()].strip(" |/,;")
+        parts = [p.strip() for p in re.split(r"[|/,;]", text) if p.strip()]
+        if not parts:
             return None
         collection = parts[0]
-        model = parts[1] if len(parts) > 1 and parts[1] else None
+        model = parts[1] if len(parts) > 1 else None
+        if len(parts) > 2 and backdrop is None:
+            backdrop = parts[2]
         if model is None:
             # «Plush Pepe Cozy Galaxy» без разделителя: ищем самое длинное известное начало
             words = collection.split()
@@ -94,9 +128,15 @@ class Arbitrage:
                     collection, model = head, " ".join(words[i:])
                     break
         c = norm(collection)
-        exact_collection = self.collections.get(c, collection)
-        exact_model = self.models.get(c, {}).get(norm(model), model) if model else None
-        return GiftKey(exact_collection, exact_model)
+        known_models = self.models.get(c, {})
+        # «Toy Bear | Onyx Black»: второе слово — известный фон, а не модель
+        if model and backdrop is None and norm(model) in self.backdrops and norm(model) not in known_models:
+            model, backdrop = None, model
+        return GiftKey(
+            self.collections.get(c, collection),
+            known_models.get(norm(model), model) if model else None,
+            self.backdrops.get(norm(backdrop), backdrop) if backdrop else None,
+        )
 
     async def _fetch(self, market: Market, key: GiftKey) -> list[Listing]:
         listings = await market.cheapest(key, limit=3)
@@ -125,6 +165,8 @@ class Arbitrage:
         )
         return dict(zip(names, results))
 
-    async def check(self, key: GiftKey, buy: Listing | None = None, max_age: float | None = None):
+    async def check(
+        self, key: GiftKey, buy: Listing | None = None, max_age: float | None = None, basis: str = "model"
+    ) -> Opportunity | None:
         quotes = await self.quotes(key, max_age)
-        return best_deal(key, quotes, buy)
+        return best_deal(key, quotes, buy, basis)

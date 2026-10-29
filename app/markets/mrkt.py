@@ -67,7 +67,7 @@ class Mrkt(Market):
             "cursor": "",
             "collectionNames": [canon(key.collection)] if key else [],
             "modelNames": [canon(key.model)] if key and key.model else [],
-            "backdropNames": [],
+            "backdropNames": [canon(key.backdrop)] if key and key.backdrop else [],
             "symbolNames": [],
             "ordering": ordering,
             "lowToHigh": low_to_high,

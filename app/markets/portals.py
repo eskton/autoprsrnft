@@ -55,4 +55,6 @@ class Portals(Market):
         params = {"sort_by": "price asc", "filter_by_collections": canon(key.collection)}
         if key.model:
             params["filter_by_models"] = canon(key.model)
+        if key.backdrop:
+            params["filter_by_backdrops"] = canon(key.backdrop)
         return await self._search(params, limit)
