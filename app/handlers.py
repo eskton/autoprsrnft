@@ -15,16 +15,16 @@ from app.storage import MODES, Storage
 router = Router()
 
 HELP = (
-    "Я сравниваю цены NFT-подарков на <b>Portals</b>, <b>Tonnel</b> и <b>MRKT</b>.\n\n"
+    "Я слежу за NFT-подарками на {markets}.\n\n"
     "<b>Проверить подарок</b> — просто напиши название:\n"
     "<code>Plush Pepe</code> — вся коллекция\n"
     "<code>Plush Pepe | Cozy Galaxy</code> — конкретная модель\n"
     "<code>Toy Bear фон Onyx Black</code> — коллекция на конкретном фоне\n"
     "<code>Toy Bear | Wizard | Onyx Black</code> — модель на фоне\n\n"
-    "<b>Автопоиск</b> — слежу за новыми лотами на всех трёх биржах:\n"
+    "<b>Автопоиск</b> — проверяю каждый новый лот:\n"
     "• <b>по фону</b>: лот дешевле флора того же фона (например, Toy Bear на Onyx Black "
     "за 52 TON при флоре 57 — это −9%)\n"
-    "• <b>по модели</b>: можно купить на одной бирже и продать дороже на другой\n\n"
+    "• <b>по модели</b>: лот можно перепродать дороже по флору той же модели\n\n"
     "/mode фон | модель | оба — что искать\n"
     "/discount 10 — на сколько % ниже флора фона\n"
     "/minprofit 2 — мин. профит в TON (по модели)\n"
@@ -35,6 +35,10 @@ HELP = (
     "/status — состояние бирж\n\n"
     "Цена покупки — с комиссией биржи, «на руки» — после комиссии при продаже."
 )
+
+def help_text(engine: Arbitrage) -> str:
+    return HELP.format(markets=", ".join(f"<b>{m.title}</b>" for m in engine.markets.values()))
+
 
 MODE_ALIASES = {
     "фон": "backdrop", "фоны": "backdrop", "backdrop": "backdrop", "bg": "backdrop",
@@ -63,9 +67,9 @@ class AccessMiddleware(BaseMiddleware):
 
 @router.message(CommandStart())
 @router.message(Command("help"))
-async def start(message: Message, storage: Storage) -> None:
+async def start(message: Message, storage: Storage, engine: Arbitrage) -> None:
     storage.get(message.from_user.id)
-    await message.answer(HELP)
+    await message.answer(help_text(engine))
 
 
 @router.message(Command("alerts"))
@@ -157,9 +161,9 @@ async def status(message: Message, engine: Arbitrage) -> None:
 async def price_check(message: Message, engine: Arbitrage) -> None:
     key = engine.resolve(message.text)
     if key is None:
-        await message.answer(HELP)
+        await message.answer(help_text(engine))
         return
-    wait = await message.answer(f"🔎 Смотрю {escape(str(key))} на всех биржах…")
+    wait = await message.answer(f"🔎 Смотрю {escape(str(key))}…")
     # По запросу пользователя всегда берём свежие данные
     quotes = await engine.quotes(key, max_age=0)
     op = best_deal(key, quotes, basis="backdrop" if key.backdrop else "model")

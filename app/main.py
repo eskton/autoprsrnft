@@ -11,6 +11,7 @@ from app.arbitrage import Arbitrage, Opportunity
 from app.config import Settings
 from app.formatting import format_opportunity
 from app.handlers import AccessMiddleware, router
+from app.markets.base import Market
 from app.markets.mrkt import Mrkt
 from app.markets.portals import Portals
 from app.markets.tonnel import Tonnel
@@ -21,6 +22,16 @@ from app.tg_auth import TelegramAuth
 log = logging.getLogger("autoprsrnft")
 
 
+def build_markets(cfg: Settings, auth: TelegramAuth | None) -> dict[str, Market]:
+    """Создаёт клиенты только для бирж из MARKETS."""
+    factories = {
+        "portals": lambda: Portals(auth, cfg.proxy, sell_fee=cfg.portals_sell_fee),
+        "tonnel": lambda: Tonnel(auth, cfg.proxy, buy_fee=cfg.tonnel_buy_fee, sell_fee=cfg.tonnel_sell_fee),
+        "mrkt": lambda: Mrkt(auth, cfg.proxy, sell_fee=cfg.mrkt_sell_fee),
+    }
+    return {name: factories[name]() for name in cfg.markets}
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = Settings()  # type: ignore[call-arg]
@@ -28,11 +39,8 @@ async def main() -> None:
     auth = TelegramAuth(cfg.session_name, cfg.api_id, cfg.api_hash)
     await auth.start()
 
-    markets = {
-        "portals": Portals(auth, cfg.proxy, sell_fee=cfg.portals_sell_fee),
-        "tonnel": Tonnel(auth, cfg.proxy, buy_fee=cfg.tonnel_buy_fee, sell_fee=cfg.tonnel_sell_fee),
-        "mrkt": Mrkt(auth, cfg.proxy, sell_fee=cfg.mrkt_sell_fee),
-    }
+    markets = build_markets(cfg, auth)
+    log.info("Биржи: %s", ", ".join(m.title for m in markets.values()))
     engine = Arbitrage(markets, floor_ttl=cfg.floor_ttl)
     storage = Storage(
         "data/users.json",
