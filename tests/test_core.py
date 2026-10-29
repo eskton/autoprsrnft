@@ -368,3 +368,62 @@ async def test_price_check_handler_with_backdrop(tmp_path):
     assert "Ищу: по фону" in sent[-1] and "10%" in sent[-1]
     for m in (portals, tonnel):
         await m.close()
+
+
+# --- выбор бирж ---------------------------------------------------------------
+
+async def test_only_enabled_markets_are_built():
+    from pydantic import ValidationError
+
+    from app.config import Settings
+    from app.handlers import help_text
+    from app.main import build_markets
+
+    base = dict(bot_token="1:x", api_id=1, api_hash="h")
+    cfg = Settings(**base)
+    assert cfg.markets == ["portals"]  # по умолчанию — только Portals
+    markets = build_markets(cfg, auth=None)
+    assert list(markets) == ["portals"]
+    text = help_text(Arbitrage(markets))
+    assert "<b>Portals</b>" in text and "Tonnel" not in text and "MRKT" not in text
+    for m in markets.values():
+        await m.close()
+
+    cfg = Settings(**base, markets=" Portals, MRKT ,portals")
+    assert cfg.markets == ["portals", "mrkt"]
+    markets = build_markets(cfg, auth=None)
+    assert [m.title for m in markets.values()] == ["Portals", "MRKT"]
+    for m in markets.values():
+        await m.close()
+
+    with pytest.raises(ValidationError, match="неизвестные биржи: fragment"):
+        Settings(**base, markets="portals,fragment")
+    with pytest.raises(ValidationError, match="хотя бы одну"):
+        Settings(**base, markets=" , ")
+
+
+async def test_single_market_flip_on_same_market():
+    """С одним Portals бот ищет перепродажу внутри него: купить новый лот, выставить по следующему флору."""
+    floor = L("portals", "p-floor", 57, 54.15, collection="Toy Bear", model="Wizard", backdrop="Onyx Black")
+    portals = FakeMarket("portals", [floor])
+    engine = Arbitrage({"portals": portals}, floor_ttl=60)
+    found = []
+
+    async def on_op(op):
+        found.append(op)
+
+    scanner = Scanner(engine, interval=0.02, on_opportunity=on_op, bases=lambda: {"backdrop"},
+                      want=lambda op: op.discount_pct >= 10)
+    scanner.start()
+    await asyncio.sleep(0.05)
+    cheap = L("portals", "p-cheap", 51, 48.45, collection="Toy Bear", model="Sheriff", backdrop="Onyx Black")
+    portals.feed.insert(0, cheap)
+    portals.floors = [cheap, floor]
+    await asyncio.sleep(0.15)
+    await scanner.stop()
+    await portals.close()
+
+    assert len(found) == 1
+    op = found[0]
+    assert op.buy.id == "p-cheap" and op.floor.id == "p-floor" and op.sell.id == "p-floor"
+    assert op.profit == pytest.approx(54.15 - 51)

@@ -6,6 +6,9 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
+KNOWN_MARKETS = {"portals", "tonnel", "mrkt"}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -19,6 +22,10 @@ class Settings(BaseSettings):
     api_id: int
     api_hash: str
     session_name: str = "data/account"
+
+    # Какие биржи подключать, через запятую: portals, tonnel, mrkt.
+    # Сейчас стабильно работает только Portals, поэтому по умолчанию — только он.
+    markets: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["portals"])
 
     # Необязательный прокси для запросов к биржам: http://user:pass@host:port
     proxy: str | None = None
@@ -42,6 +49,18 @@ class Settings(BaseSettings):
     tonnel_buy_fee: float = 0.10     # сверху к цене для покупателя (API отдаёт цену без неё)
     tonnel_sell_fee: float = 0.0     # с продавца
     mrkt_sell_fee: float = 0.05      # запасной вариант, если API не вернул salePriceWithoutFee
+
+    @field_validator("markets", mode="before")
+    @classmethod
+    def _split_markets(cls, v):
+        if isinstance(v, str):
+            v = [x.strip().lower() for x in v.split(",") if x.strip()]
+        unknown = sorted(set(v) - KNOWN_MARKETS)
+        if unknown:
+            raise ValueError(f"неизвестные биржи: {', '.join(unknown)} (есть: portals, tonnel, mrkt)")
+        if not v:
+            raise ValueError("укажи хотя бы одну биржу")
+        return list(dict.fromkeys(v))
 
     @field_validator("allowed_users", mode="before")
     @classmethod
