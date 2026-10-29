@@ -40,6 +40,8 @@ async def main() -> None:
             min_profit_ton=cfg.min_profit_ton,
             min_profit_pct=cfg.min_profit_pct,
             max_buy_ton=cfg.max_buy_ton,
+            mode=cfg.default_mode,
+            min_discount_pct=cfg.min_discount_pct,
         ),
     )
 
@@ -49,10 +51,13 @@ async def main() -> None:
     dp.include_router(router)
 
     async def notify(op: Opportunity) -> None:
-        log.info("Сделка: %s %s -> %s %+.2f TON", op.key, op.buy.market, op.sell.market, op.profit)
-        text = format_opportunity(op, markets, header="⚡️ <b>Арбитраж</b>\n")
+        log.info(
+            "Сделка (%s): %s %s %.2f, флор %.2f (%+.1f%%), профит %+.2f TON",
+            op.basis, op.key, op.buy.market, op.buy.buy_cost, op.floor.buy_cost, -op.discount_pct, op.profit,
+        )
+        text = format_opportunity(op, markets)
         for user_id, s in list(storage.users.items()):
-            if s.accepts(op.profit, op.pct, op.buy.buy_cost):
+            if s.accepts(op):
                 try:
                     await bot.send_message(user_id, text, disable_web_page_preview=True)
                 except Exception as e:
@@ -65,7 +70,13 @@ async def main() -> None:
             return False
         return any(not lim or listing.buy_cost <= lim for lim in limits)
 
-    scanner = Scanner(engine, cfg.poll_interval, notify, prefilter)
+    def bases() -> set[str]:
+        return {b for b in ("model", "backdrop") if any(s.wants(b) for s in storage.users.values())}
+
+    def want(op: Opportunity) -> bool:
+        return any(s.accepts(op) for s in storage.users.values())
+
+    scanner = Scanner(engine, cfg.poll_interval, notify, prefilter, bases, want)
     scanner.start()
     try:
         await dp.start_polling(bot)

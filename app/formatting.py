@@ -44,18 +44,29 @@ def quotes_table(markets: dict[str, Market], quotes: Quotes) -> str:
     return "\n".join(lines)
 
 
-def format_opportunity(op: Opportunity, markets: dict[str, Market], header: str = "") -> str:
+def format_opportunity(op: Opportunity, markets: dict[str, Market], header: str | None = None) -> str:
+    """Сообщение о находке. Для сравнения по фону — ещё флор фона и скидка от него."""
+    by_backdrop = op.basis == "backdrop"
+    if header is None:
+        header = (
+            f"🎯 <b>Ниже флора фона на {op.discount_pct:.0f}%</b>\n" if by_backdrop else "⚡️ <b>Арбитраж</b>\n"
+        )
     sign = "🟢" if op.profit > 0 else "🔴"
-    parts = [header] if header else []
+    parts = [header, _gift_line(op.buy), ""]
+    parts.append(f"🛒 Купить: {_market_link(markets, op.buy.market)} — <b>{ton(op.buy.buy_cost)} TON</b>")
+    if by_backdrop:
+        parts.append(
+            f"📉 Флор фона {escape(op.key.backdrop or '')}: <b>{ton(op.floor.buy_cost)} TON</b> "
+            f"на {_market_link(markets, op.floor.market)} — лот дешевле на <b>{op.discount_pct:.1f}%</b>"
+        )
+        if op.others < 3:
+            parts.append(f"⚠️ Других лотов на этом фоне всего {op.others} — флор может быть случайным")
     parts += [
-        _gift_line(op.buy),
-        "",
-        f"🛒 Купить: {_market_link(markets, op.buy.market)} — <b>{ton(op.buy.buy_cost)} TON</b>",
         f"💸 Продать: {_market_link(markets, op.sell.market)} — флор {ton(op.sell.buy_cost)}, "
         f"на руки <b>{ton(op.sell_net)} TON</b>",
         f"{sign} Профит: <b>{op.profit:+.2f} TON ({op.pct:+.1f}%)</b>",
         "",
-        "<b>Флоры:</b>",
+        "<b>Флоры фона:</b>" if by_backdrop else "<b>Флоры:</b>",
         quotes_table(markets, op.quotes),
     ]
     return "\n".join(parts)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     min_profit_ton: float = 1.0
     min_profit_pct: float = 5.0
     max_buy_ton: float = 0.0  # 0 = без лимита
+    # Что искать: model (перепродажа по флору модели), backdrop (лот ниже флора фона), both
+    default_mode: Literal["model", "backdrop", "both"] = "both"
+    # Насколько лот должен быть дешевле флора того же фона, %
+    min_discount_pct: float = 10.0
 
     # Комиссии бирж (доли). Проверяй актуальные значения в самих маркетах!
     portals_sell_fee: float = 0.05   # с продавца

@@ -39,11 +39,17 @@ class Scanner:
         interval: float,
         on_opportunity: Callable[[Opportunity], Awaitable[None]],
         prefilter: Callable[[Listing], bool] = lambda _: True,
+        bases: Callable[[], set[str]] = lambda: {"model"},
+        want: Callable[[Opportunity], bool] = lambda op: op.profit > 0,
     ):
         self.engine = engine
         self.interval = interval
         self.on_opportunity = on_opportunity
         self.prefilter = prefilter
+        # По чему сравнивать новые лоты: model — с флором той же модели, backdrop — того же фона
+        self.bases = bases
+        # Нужна ли кому-то такая сделка (чтобы не тратить запросы на перепроверку)
+        self.want = want
         self._alerted = SeenSet()
         self._tasks: list[asyncio.Task] = []
         self._pending: set[asyncio.Task] = set()
@@ -85,15 +91,19 @@ class Scanner:
                 await asyncio.sleep(delay)
 
     async def _handle(self, listing: Listing) -> None:
-        try:
-            op = await self.engine.check(listing.key, buy=listing)
-            if op is None or op.profit <= 0:
-                return
-            # Нашли что-то выгодное по кешу — перепроверяем на свежих данных
-            op = await self.engine.check(listing.key, buy=listing, max_age=CONFIRM_MAX_AGE)
-            if op is None or op.profit <= 0:
-                return
-            if self._alerted.add((listing.market, listing.id, round(listing.buy_cost, 4))):
-                await self.on_opportunity(op)
-        except Exception:
-            log.exception("Ошибка при проверке лота %s/%s", listing.market, listing.id)
+        for basis in sorted(self.bases()):
+            key = listing.backdrop_key if basis == "backdrop" else listing.key
+            if key is None:
+                continue
+            try:
+                op = await self.engine.check(key, buy=listing, basis=basis)
+                if op is None or not self.want(op):
+                    continue
+                # Нашли что-то интересное по кешу — перепроверяем на свежих данных
+                op = await self.engine.check(key, buy=listing, max_age=CONFIRM_MAX_AGE, basis=basis)
+                if op is None or not self.want(op):
+                    continue
+                if self._alerted.add((basis, listing.market, listing.id, round(listing.buy_cost, 4))):
+                    await self.on_opportunity(op)
+            except Exception:
+                log.exception("Ошибка при проверке лота %s/%s (%s)", listing.market, listing.id, basis)
