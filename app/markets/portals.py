@@ -51,6 +51,28 @@ class Portals(Market):
     async def _latest(self, limit: int) -> list[Listing]:
         return await self._search({"sort_by": "listed_at desc"}, limit)
 
+    async def buy(self, listing: Listing) -> None:
+        """Покупает лот по его текущей цене. Если цену успели поменять, Portals откажет."""
+        await self.call(self._buy, listing)
+
+    async def _buy(self, listing: Listing) -> None:
+        # Цену отправляем ровно той строкой, что пришла от API ("57" / "57.5")
+        price = str(listing.raw.get("price") or listing.buy_cost)
+        payload = {"nft_details": [{"id": listing.id, "price": price}]}
+        headers = {**HEADERS, "Authorization": "tma " + await self.auth.init_data(self.name)}
+        resp = await self.http.post(API + "nfts", json=payload, headers=headers)
+        if resp.status_code != 204:
+            self.check(resp)
+
+    async def balance(self) -> float:
+        """Баланс TON на Portals."""
+        return await self.call(self._balance)
+
+    async def _balance(self) -> float:
+        headers = {**HEADERS, "Authorization": "tma " + await self.auth.init_data(self.name)}
+        data = self.check(await self.http.get(API + "users/wallets/", headers=headers))
+        return float(data.get("balance") or 0)
+
     async def _cheapest(self, key: GiftKey, limit: int) -> list[Listing]:
         params = {"sort_by": "price asc", "filter_by_collections": canon(key.collection)}
         if key.model:

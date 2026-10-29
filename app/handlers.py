@@ -9,6 +9,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message, TelegramObject
 
 from app.arbitrage import Arbitrage, best_deal
+from app.autobuy import AutoBuyer
 from app.formatting import format_price_check, ton
 from app.storage import MODES, Storage
 
@@ -30,6 +31,7 @@ HELP = (
     "/minprofit 2 — мин. профит в TON (по модели)\n"
     "/minpct 7 — мин. профит в % (по модели)\n"
     "/maxbuy 100 — не показывать лоты дороже (0 = без лимита)\n"
+    "/autobuy — автопокупка лотов ниже флора фона (тест, лимиты, бюджет)\n"
     "/alerts — включить/выключить уведомления\n"
     "/settings — текущие настройки\n"
     "/status — состояние бирж\n\n"
@@ -141,6 +143,81 @@ async def set_max_buy(message: Message, command: CommandObject, storage: Storage
 @router.message(Command("discount"))
 async def set_min_discount(message: Message, command: CommandObject, storage: Storage) -> None:
     await _set_number(message, command, storage, "min_discount_pct")
+
+
+AUTOBUY_NUMBERS = {
+    # команда: (поле, мин, макс, целое?)
+    "max": ("max_price", 0, 1_000_000, False),
+    "budget": ("daily_budget", 0, 10_000_000, False),
+    "discount": ("min_discount", 1, 90, False),
+    "others": ("min_others", 0, 50, True),
+    "profit": ("min_profit", 0, 1_000_000, False),
+}
+
+
+@router.message(Command("autobuy"))
+async def autobuy_cmd(
+    message: Message, command: CommandObject, autobuyer: AutoBuyer | None, owners: list[int]
+) -> None:
+    if autobuyer is None:
+        await message.answer("Автопокупка работает только с Portals — добавь его в MARKETS в .env")
+        return
+    if message.from_user.id not in owners:
+        await message.answer(
+            "Автопокупкой управляет только владелец: впиши свой id в ALLOWED_USERS в .env.\n"
+            f"Твой id: <code>{message.from_user.id}</code>"
+        )
+        return
+    s = autobuyer.settings
+    args = (command.args or "").split()
+    if not args:
+        try:
+            balance = await autobuyer.market.balance()
+        except Exception:
+            balance = None
+        await message.answer(autobuyer.status_text(balance), disable_web_page_preview=True)
+        return
+
+    cmd = args[0].lower()
+    if cmd in ("off", "выкл", "stop", "стоп"):
+        s.enabled = False
+        autobuyer.save()
+        await message.answer("⏸ Автопокупка выключена")
+    elif cmd in ("test", "тест"):
+        s.enabled, s.test = True, True
+        autobuyer.save()
+        await message.answer(
+            "🧪 Тестовый режим: ничего не покупаю, только пишу, что купил бы. "
+            "Когда убедишься, что находки нормальные — /autobuy on"
+        )
+    elif cmd in ("on", "вкл", "start"):
+        problem = autobuyer.ready_for_real()
+        if problem:
+            await message.answer(problem)
+            return
+        s.enabled, s.test = True, False
+        autobuyer.reset_failures()
+        autobuyer.save()
+        await message.answer(
+            f"🟢 Автопокупка включена: покупаю лоты дешевле флора фона на {s.min_discount:g}%+, "
+            f"не дороже {s.max_price:g} TON, не больше {s.daily_budget:g} TON за сутки. Выключить: /autobuy off"
+        )
+    elif cmd in AUTOBUY_NUMBERS:
+        field, lo, hi, whole = AUTOBUY_NUMBERS[cmd]
+        try:
+            value = float((args[1] if len(args) > 1 else "").replace(",", "."))
+            if whole:
+                value = int(value)
+            if not lo <= value <= hi:
+                raise ValueError
+        except ValueError:
+            await message.answer(f"Укажи число от {lo} до {hi}, например: <code>/autobuy {cmd} 10</code>")
+            return
+        setattr(s, field, value)
+        autobuyer.save()
+        await message.answer("✅ Сохранено")
+    else:
+        await message.answer(autobuyer.status_text(None), disable_web_page_preview=True)
 
 
 @router.message(Command("status"))

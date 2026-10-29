@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from app.arbitrage import Arbitrage, Opportunity
+from app.autobuy import AutoBuyer
 from app.config import Settings
 from app.formatting import format_opportunity
 from app.handlers import AccessMiddleware, router
@@ -54,7 +55,27 @@ async def main() -> None:
     )
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher(engine=engine, storage=storage)
+
+    async def notify_owners(text: str) -> None:
+        for user_id in cfg.allowed_users:
+            try:
+                await bot.send_message(user_id, text, disable_web_page_preview=True)
+            except Exception as e:
+                log.warning("Не удалось отправить %s: %s", user_id, e)
+
+    # Автопокупка есть только на Portals; управляют ей владельцы из ALLOWED_USERS
+    portals = markets.get("portals")
+    autobuyer = AutoBuyer("data/autobuy.json", portals, notify_owners) if portals else None
+    if autobuyer and autobuyer.settings.enabled:
+        if not cfg.allowed_users:
+            # Без владельца некому сообщать о покупках и некому их остановить
+            autobuyer.settings.enabled = False
+            autobuyer.save()
+            log.warning("Автопокупка выключена: не задан ALLOWED_USERS")
+        else:
+            log.info("Автопокупка включена (%s)", "тест" if autobuyer.settings.test else "по-настоящему")
+
+    dp = Dispatcher(engine=engine, storage=storage, autobuyer=autobuyer, owners=cfg.allowed_users)
     dp.update.outer_middleware(AccessMiddleware(cfg.allowed_users))
     dp.include_router(router)
 
@@ -71,20 +92,35 @@ async def main() -> None:
                 except Exception as e:
                     log.warning("Не удалось отправить %s: %s", user_id, e)
 
+    def autobuy_on() -> bool:
+        return autobuyer is not None and autobuyer.settings.enabled
+
+    async def on_opportunity(op: Opportunity) -> None:
+        if autobuyer is not None:
+            await autobuyer.consider(op)  # сначала покупка — тут решает скорость
+        await notify(op)
+
     def prefilter(listing) -> bool:
-        # Не тратим запросы на лоты, которые не интересны ни одному пользователю
+        # Не тратим запросы на лоты, которые не интересны ни пользователям, ни автопокупке
+        if autobuy_on() and listing.market == autobuyer.market.name:
+            limit = autobuyer.settings.max_price
+            if not limit or listing.buy_cost <= limit:
+                return True
         limits = [s.max_buy_ton for s in storage.users.values() if s.alerts]
-        if not limits:
-            return False
         return any(not lim or listing.buy_cost <= lim for lim in limits)
 
     def bases() -> set[str]:
-        return {b for b in ("model", "backdrop") if any(s.wants(b) for s in storage.users.values())}
+        found = {b for b in ("model", "backdrop") if any(s.wants(b) for s in storage.users.values())}
+        if autobuy_on():
+            found.add("backdrop")
+        return found
 
     def want(op: Opportunity) -> bool:
+        if autobuyer is not None and autobuyer.wants(op):
+            return True
         return any(s.accepts(op) for s in storage.users.values())
 
-    scanner = Scanner(engine, cfg.poll_interval, notify, prefilter, bases, want)
+    scanner = Scanner(engine, cfg.poll_interval, on_opportunity, prefilter, bases, want)
     scanner.start()
     try:
         await dp.start_polling(bot)
