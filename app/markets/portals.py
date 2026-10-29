@@ -75,8 +75,8 @@ class Portals(Market):
     title = "Portals"
     app_url = "https://t.me/portals/market"
 
-    def __init__(self, auth, proxy=None, sell_fee: float = 0.05):
-        super().__init__(auth, proxy)
+    def __init__(self, auth, proxy=None, sell_fee: float = 0.05, request_gap: float = 0.0):
+        super().__init__(auth, proxy, request_gap)
         self.sell_fee = sell_fee
         self._activity_off_until = 0.0
         self.feed = "activity"
@@ -128,9 +128,10 @@ class Portals(Market):
         price = str(listing.raw.get("price") or listing.buy_cost)
         payload = {"nft_details": [{"id": listing.id, "price": price}]}
         headers = {**HEADERS, "Authorization": "tma " + await self.auth.init_data(self.name)}
-        resp = await self.http.post(API + "nfts", json=payload, headers=headers)
-        if resp.status_code != 204:
-            self.check(resp)
+        data = self.check(await self.http.post(API + "nfts", json=payload, headers=headers))
+        # Если лот уже купил кто-то другой, Portals отвечает 200, но total_purchased = 0
+        if not data.get("total_purchased"):
+            raise MarketError(f"{self.name}: не куплено — лот уже продан или цена изменилась: {str(data)[:200]}")
 
     async def balance(self) -> float:
         """Баланс TON на Portals."""

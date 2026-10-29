@@ -150,7 +150,7 @@ async def test_portals_buy_request():
     from app.markets.portals import Portals
 
     portals = Portals(FakeAuth())
-    portals.http = FakeHttp({})
+    portals.http = FakeHttp({"total_purchased": 1})
     await portals.buy(lot("uuid-1", 51.5))
     method, url, kw = portals.http.calls[0]
     assert method == "POST" and url.endswith("/api/nfts")
@@ -166,7 +166,27 @@ async def test_portals_buy_request():
     portals.http = Refuse({})
     with pytest.raises(MarketError, match="already sold"):
         await portals.buy(lot("uuid-2", 10))
+
+    # Лот перехватили: Portals отвечает 200, но «куплено 0» — это не покупка
+    portals.http = FakeHttp({"total_purchased": 0})
+    with pytest.raises(MarketError, match="не куплено"):
+        await portals.buy(lot("uuid-3", 10))
     await portals.close()
+
+
+async def test_lost_race_is_not_counted_as_purchase(ab):
+    from test_core import FakeAuth, FakeHttp
+
+    from app.markets.portals import Portals
+
+    real(ab)
+    market = Portals(FakeAuth())
+    market.http = FakeHttp({"total_purchased": 0})
+    ab.market = market
+    await ab.consider(deal(51))
+    assert ab.spent_today() == 0 and ab.history == []
+    assert "Не купил" in ab.sent[-1] and "не куплено" in ab.sent[-1]
+    await market.close()
 
 
 async def test_autobuy_command(ab):
