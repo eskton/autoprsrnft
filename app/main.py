@@ -30,7 +30,10 @@ def build_markets(cfg: Settings, auth: TelegramAuth | None) -> dict[str, Market]
         "tonnel": lambda: Tonnel(auth, cfg.proxy, buy_fee=cfg.tonnel_buy_fee, sell_fee=cfg.tonnel_sell_fee),
         "mrkt": lambda: Mrkt(auth, cfg.proxy, sell_fee=cfg.mrkt_sell_fee),
     }
-    return {name: factories[name]() for name in cfg.markets}
+    markets = {name: factories[name]() for name in cfg.markets}
+    for market in markets.values():
+        market.request_gap = cfg.request_gap
+    return markets
 
 
 async def main() -> None:

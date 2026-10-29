@@ -38,11 +38,16 @@ class Market(ABC):
     # Ссылка, по которой открыть маркет в Telegram
     app_url: str = ""
 
-    def __init__(self, auth: TelegramAuth | None, proxy: str | None = None):
+    def __init__(self, auth: TelegramAuth | None, proxy: str | None = None, request_gap: float = 0.0):
         self.auth = auth
         self.http = AsyncSession(impersonate="chrome", timeout=10, proxy=proxy)
         # Не пускаем к одной бирже больше N запросов одновременно, чтобы не словить бан
         self._sem = asyncio.Semaphore(4)
+        # Минимальная пауза между фоновыми запросами. Portals отвечает 429 уже примерно
+        # на 1 запрос в секунду, а за частые запросы биржи банят аккаунт (так было на MRKT)
+        self.request_gap = request_gap
+        self._pace_lock = asyncio.Lock()
+        self._next_slot = 0.0
         self._cooldown_until = 0.0
         self.last_ok: float | None = None
         self.last_error: str | None = None
@@ -63,6 +68,7 @@ class Market(ABC):
                     started = time.monotonic()
                     result = await fn(*args, **kwargs)
                 else:
+                    await self._pace()
                     async with self._sem:
                         started = time.monotonic()
                         result = await fn(*args, **kwargs)
@@ -79,6 +85,15 @@ class Market(ABC):
             except Exception as e:
                 self.last_error = f"{type(e).__name__}: {e}"[:200]
                 raise
+
+    async def _pace(self) -> None:
+        if self.request_gap <= 0:
+            return
+        async with self._pace_lock:
+            wait = self._next_slot - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._next_slot = time.monotonic() + self.request_gap
 
     def check(self, resp) -> Any:
         if resp.status_code in (401, 403):

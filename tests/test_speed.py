@@ -86,7 +86,7 @@ async def test_portals_feed_uses_activity_and_falls_back():
 
 async def test_buy_skips_queue_and_cooldown():
     p = Portals(FakeAuth())
-    p.http = FakeHttp({})
+    p.http = FakeHttp({"total_purchased": 1})
     for _ in range(4):  # очередь занята фоновыми запросами
         await p._sem.acquire()
     p._cooldown_until = time.monotonic() + 30  # и биржа недавно ответила 429
@@ -190,3 +190,16 @@ async def test_background_auth_refresh_does_not_block():
     assert await asyncio.wait_for(auth.init_data("portals"), timeout=0.05) == "data1"
     await refresh
     assert await auth.init_data("portals") == "data2"
+
+
+async def test_background_requests_are_paced_but_buy_is_not():
+    """Не чаще 1 фонового запроса в request_gap — иначе Portals отвечает 429 и может забанить."""
+    p = Portals(FakeAuth(), request_gap=0.05)
+    p.http = FakeHttp({"results": [], "total_purchased": 1})
+    started = time.monotonic()
+    await asyncio.gather(*(p.cheapest(GiftKey("Toy Bear")) for _ in range(4)))
+    assert time.monotonic() - started >= 0.15  # 4 запроса с паузами 0.05 между стартами
+    started = time.monotonic()
+    await p.buy(L("portals", "x", 50))
+    assert time.monotonic() - started < 0.04  # покупка не ждёт очередь
+    await p.close()
