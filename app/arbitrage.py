@@ -138,6 +138,25 @@ class Arbitrage:
             self.backdrops.get(norm(backdrop), backdrop) if backdrop else None,
         )
 
+    def observe(self, x: Listing) -> None:
+        """Лот из ленты (новый или с новой ценой) сразу попадает в закешированные флоры.
+        Так кеш не устаревает от новых лотов: если кто-то выставил дешевле, флор это уже знает."""
+        for key in (x.key, x.backdrop_key):
+            if key is None:
+                continue
+            ck = (x.market, key.id)
+            cached = self._cache.get(ck)
+            if cached is None:
+                continue
+            fetched_at, listings = cached
+            merged = sorted([y for y in listings if y.id != x.id] + [x], key=lambda y: y.buy_cost)
+            self._cache[ck] = (fetched_at, merged[:5])
+
+    def age(self, market: str, key: GiftKey) -> float | None:
+        """Сколько секунд назад флор этого ключа запрашивали с биржи."""
+        cached = self._cache.get((market, key.id))
+        return time.monotonic() - cached[0] if cached else None
+
     async def _fetch(self, market: Market, key: GiftKey) -> list[Listing]:
         listings = await market.cheapest(key, limit=3)
         self._cache[(market.name, key.id)] = (time.monotonic(), listings)

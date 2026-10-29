@@ -10,6 +10,7 @@ from aiogram.types import Message, TelegramObject
 
 from app.arbitrage import Arbitrage, best_deal
 from app.autobuy import AutoBuyer
+from app.scanner import Scanner
 from app.formatting import format_price_check, ton
 from app.storage import MODES, Storage
 
@@ -202,6 +203,17 @@ async def autobuy_cmd(
             f"🟢 Автопокупка включена: покупаю лоты дешевле флора фона на {s.min_discount:g}%+, "
             f"не дороже {s.max_price:g} TON, не больше {s.daily_budget:g} TON за сутки. Выключить: /autobuy off"
         )
+    elif cmd in ("fast", "быстро"):
+        value = (args[1] if len(args) > 1 else "").lower()
+        if value not in ("on", "off", "вкл", "выкл"):
+            await message.answer("Укажи: <code>/autobuy fast on</code> или <code>/autobuy fast off</code>")
+            return
+        s.fast = value in ("on", "вкл")
+        autobuyer.save()
+        await message.answer(
+            "⚡️ Быстрый режим включён: покупаю сразу, флор беру из памяти"
+            if s.fast else "🐢 Быстрый режим выключен: перед покупкой перепроверяю флор (+1 запрос)"
+        )
     elif cmd in AUTOBUY_NUMBERS:
         field, lo, hi, whole = AUTOBUY_NUMBERS[cmd]
         try:
@@ -221,15 +233,27 @@ async def autobuy_cmd(
 
 
 @router.message(Command("status"))
-async def status(message: Message, engine: Arbitrage) -> None:
+async def status(message: Message, engine: Arbitrage, scanner: Scanner | None = None) -> None:
     lines = []
     for m in engine.markets.values():
         if m.last_error:
-            lines.append(f"⚠️ {m.title}: {m.last_error}")
+            lines.append(f"⚠️ <b>{m.title}</b>: {escape(m.last_error)}")
         elif m.last_ok:
-            lines.append(f"✅ {m.title}: ок ({time.time() - m.last_ok:.0f}с назад)")
+            lines.append(f"✅ <b>{m.title}</b>: ок ({time.time() - m.last_ok:.0f}с назад)")
         else:
-            lines.append(f"⏳ {m.title}: ещё не опрашивалась")
+            lines.append(f"⏳ <b>{m.title}</b>: ещё не опрашивалась")
+        speed = []
+        if m.rtt_ms is not None:
+            speed.append(f"ответ биржи ~{m.rtt_ms:.0f} мс")
+        if scanner and m.name in scanner.delays:
+            speed.append(f"опрос раз в {scanner.delays[m.name]:.2f} с")
+        if scanner and m.name in scanner.lag:
+            speed.append(f"вижу лоты через ~{max(0.0, scanner.lag[m.name]):.2f} с после выставления")
+        feed = getattr(m, "feed", None)
+        if feed:
+            speed.append("лента: новые лоты + снижения цены" if feed == "activity" else "лента: только новые лоты")
+        if speed:
+            lines.append("    " + "\n    ".join(speed))
     lines.append(f"\nИзвестно коллекций: {len(engine.collections)}, фонов: {len(engine.backdrops)}")
     await message.answer("\n".join(lines))
 
