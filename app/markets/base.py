@@ -15,11 +15,21 @@ log = logging.getLogger(__name__)
 
 
 class MarketError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class AuthExpired(MarketError):
     pass
+
+
+class RateLimited(MarketError):
+    pass
+
+
+# Пауза для фоновых запросов после ответа 429
+COOLDOWN = 2.0
 
 
 class Market(ABC):
@@ -36,19 +46,28 @@ class Market(ABC):
         self._cooldown_until = 0.0
         self.last_ok: float | None = None
         self.last_error: str | None = None
+        self.rtt_ms: float | None = None  # среднее время ответа биржи
 
     async def close(self) -> None:
         await self.http.close()
 
-    async def call(self, fn, *args, **kwargs) -> Any:
-        """Выполняет запрос: ждёт cooldown после 429 и один раз переавторизуется при 401/403."""
+    async def call(self, fn, *args, priority: bool = False, **kwargs) -> Any:
+        """Выполняет запрос: ждёт cooldown после 429 и один раз переавторизуется при 401/403.
+        priority=True (покупка) — без очереди и без паузы после 429: тут важна каждая миллисекунда."""
         for attempt in (1, 2):
             wait = self._cooldown_until - time.monotonic()
-            if wait > 0:
+            if wait > 0 and not priority:
                 await asyncio.sleep(wait)
             try:
-                async with self._sem:
+                if priority:
+                    started = time.monotonic()
                     result = await fn(*args, **kwargs)
+                else:
+                    async with self._sem:
+                        started = time.monotonic()
+                        result = await fn(*args, **kwargs)
+                ms = (time.monotonic() - started) * 1000
+                self.rtt_ms = ms if self.rtt_ms is None else self.rtt_ms * 0.8 + ms * 0.2
                 self.last_ok = time.time()
                 self.last_error = None
                 return result
@@ -63,12 +82,12 @@ class Market(ABC):
 
     def check(self, resp) -> Any:
         if resp.status_code in (401, 403):
-            raise AuthExpired(f"{self.name}: {resp.status_code}")
+            raise AuthExpired(f"{self.name}: {resp.status_code}", resp.status_code)
         if resp.status_code == 429:
-            self._cooldown_until = time.monotonic() + 5
-            raise MarketError(f"{self.name}: 429 Too Many Requests")
+            self._cooldown_until = time.monotonic() + COOLDOWN
+            raise RateLimited(f"{self.name}: 429 Too Many Requests", 429)
         if resp.status_code != 200:
-            raise MarketError(f"{self.name}: HTTP {resp.status_code}: {resp.text[:200]}")
+            raise MarketError(f"{self.name}: HTTP {resp.status_code}: {resp.text[:200]}", resp.status_code)
         return resp.json()
 
     async def reset_auth(self) -> None:

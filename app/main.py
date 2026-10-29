@@ -8,7 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from app.arbitrage import Arbitrage, Opportunity
-from app.autobuy import AutoBuyer
+from app.autobuy import FAST_FLOOR_AGE, AutoBuyer
 from app.config import Settings
 from app.formatting import format_opportunity
 from app.handlers import AccessMiddleware, router
@@ -16,7 +16,7 @@ from app.markets.base import Market
 from app.markets.mrkt import Mrkt
 from app.markets.portals import Portals
 from app.markets.tonnel import Tonnel
-from app.scanner import Scanner
+from app.scanner import CONFIRM_MAX_AGE, Scanner
 from app.storage import Storage, UserSettings
 from app.tg_auth import TelegramAuth
 
@@ -120,11 +120,24 @@ async def main() -> None:
             return True
         return any(s.accepts(op) for s in storage.users.values())
 
-    scanner = Scanner(engine, cfg.poll_interval, on_opportunity, prefilter, bases, want)
+    def confirm_age(op: Opportunity) -> float:
+        # В быстром режиме автопокупки не тратим время на перепроверку свежего флора
+        if autobuyer is not None and autobuyer.settings.fast and autobuyer.wants(op):
+            return FAST_FLOOR_AGE
+        return CONFIRM_MAX_AGE
+
+    scanner = Scanner(
+        engine, cfg.poll_interval, on_opportunity, prefilter, bases, want, confirm_age,
+        max_interval=cfg.max_poll_interval,
+    )
+    dp["scanner"] = scanner
     scanner.start()
+    # initData обновляем заранее, чтобы ни опрос, ни покупка не ждали Telegram
+    refresher = asyncio.create_task(auth.keep_fresh(list(markets)))
     try:
         await dp.start_polling(bot)
     finally:
+        refresher.cancel()
         await scanner.stop()
         for m in markets.values():
             await m.close()

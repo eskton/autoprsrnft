@@ -1,20 +1,23 @@
-"""Быстрый поиск арбитража: опрашиваем ленту новых лотов каждой биржи и
-сразу сравниваем каждый новый лот с флорами на остальных биржах."""
+"""Быстрый поиск сделок: опрашиваем ленту новых лотов каждой биржи и
+сразу сравниваем каждый новый лот с флорами."""
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict
 from typing import Awaitable, Callable
 
 from app.arbitrage import Arbitrage, Opportunity
-from app.markets.base import Market
+from app.markets.base import Market, RateLimited
 from app.models import Listing
 
 log = logging.getLogger(__name__)
 
 # Флор, на основе которого нашли сделку, перепроверяем, если он старше стольких секунд
 CONFIRM_MAX_AGE = 3.0
+# Сколько событий брать из ленты за один опрос
+FEED_LIMIT = 20
 
 
 class SeenSet:
@@ -41,15 +44,24 @@ class Scanner:
         prefilter: Callable[[Listing], bool] = lambda _: True,
         bases: Callable[[], set[str]] = lambda: {"model"},
         want: Callable[[Opportunity], bool] = lambda op: op.profit > 0,
+        confirm_age: Callable[[Opportunity], float] = lambda op: CONFIRM_MAX_AGE,
+        max_interval: float = 10.0,
     ):
         self.engine = engine
-        self.interval = interval
+        # Опрашиваем ленту так часто, как позволяет биржа: от interval до max_interval
+        self.min_interval = interval
+        self.max_interval = max(max_interval, interval)
         self.on_opportunity = on_opportunity
         self.prefilter = prefilter
         # По чему сравнивать новые лоты: model — с флором той же модели, backdrop — того же фона
         self.bases = bases
         # Нужна ли кому-то такая сделка (чтобы не тратить запросы на перепроверку)
         self.want = want
+        # Насколько свежим должен быть флор, чтобы действовать без перепроверки
+        self.confirm_age = confirm_age
+        # Для /status: пауза между опросами и через сколько секунд после выставления видим лот
+        self.delays: dict[str, float] = {}
+        self.lag: dict[str, float] = {}
         self._alerted = SeenSet()
         self._tasks: list[asyncio.Task] = []
         self._pending: set[asyncio.Task] = set()
@@ -66,29 +78,46 @@ class Scanner:
     async def _loop(self, market: Market) -> None:
         seen = SeenSet()
         first = True
-        errors = 0
+        delay = self.min_interval
         while True:
             try:
-                listings = await market.latest(limit=20)
+                listings = await market.latest(limit=FEED_LIMIT)
+                now = time.time()
                 self.engine.learn(listings)
-                # Ключ с ценой: если лот перевыставили дешевле, он снова считается новым
-                fresh = [x for x in listings if seen.add((x.id, round(x.buy_cost, 4)))]
-                if not first:
-                    for x in fresh:
-                        if self.prefilter(x):
-                            task = asyncio.create_task(self._handle(x))
-                            self._pending.add(task)
-                            task.add_done_callback(self._pending.discard)
+                for x in listings:
+                    # Ключ с ценой: если лот перевыставили дешевле, он снова считается новым
+                    if not seen.add((x.id, round(x.buy_cost, 4))):
+                        continue
+                    x.seen_at = now
+                    self.engine.observe(x)
+                    if first:
+                        continue  # первый опрос: просто запоминаем то, что уже висит
+                    self._track_lag(market.name, x)
+                    if self.prefilter(x):
+                        task = asyncio.create_task(self._handle(x))
+                        self._pending.add(task)
+                        task.add_done_callback(self._pending.discard)
                 first = False
-                errors = 0
-                await asyncio.sleep(self.interval)
+                # Биржа отвечает — понемногу возвращаемся к самому частому опросу
+                delay = max(self.min_interval, delay * 0.85)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                errors += 1
-                delay = min(60, self.interval * 2**errors)
-                log.warning("%s: ошибка ленты (%s), повтор через %.0fс", market.name, e, delay)
-                await asyncio.sleep(delay)
+                # 429 или сбой: опрашиваем реже, чтобы биржа не забанила
+                delay = min(self.max_interval, max(delay * 2, self.min_interval * 2))
+                level = logging.INFO if isinstance(e, RateLimited) else logging.WARNING
+                log.log(level, "%s: ошибка ленты (%s), следующий опрос через %.1fс", market.name, e, delay)
+            self.delays[market.name] = delay
+            await asyncio.sleep(delay)
+
+    def _track_lag(self, market: str, x: Listing) -> None:
+        if x.event_at is None or x.seen_at is None:
+            return
+        lag = x.seen_at - x.event_at
+        # Старые лоты с новой ценой и сильно сбитые часы не считаем
+        if -2 <= lag <= 120:
+            prev = self.lag.get(market)
+            self.lag[market] = lag if prev is None else prev * 0.8 + lag * 0.2
 
     async def _handle(self, listing: Listing) -> None:
         for basis in sorted(self.bases()):
@@ -99,8 +128,8 @@ class Scanner:
                 op = await self.engine.check(key, buy=listing, basis=basis)
                 if op is None or not self.want(op):
                     continue
-                # Нашли что-то интересное по кешу — перепроверяем на свежих данных
-                op = await self.engine.check(key, buy=listing, max_age=CONFIRM_MAX_AGE, basis=basis)
+                # Флор старше допустимого — перепроверяем на свежих данных
+                op = await self.engine.check(key, buy=listing, max_age=self.confirm_age(op), basis=basis)
                 if op is None or not self.want(op):
                     continue
                 if self._alerted.add((basis, listing.market, listing.id, round(listing.buy_cost, 4))):

@@ -2,9 +2,28 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 _RARITY_RE = re.compile(r"\s*\([\d.,]+%\)\s*$")
 _WORD_RE = re.compile(r"\w+(?:'\w+)?")
+_ISO_RE = re.compile(r"(\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:?\d\d)?$")
+
+
+def parse_ts(value) -> float | None:
+    """Время от биржи ('2025-07-01T12:00:00.123456Z', '...+03:00', unix) -> unix-время или None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return value / 1000 if value > 1e12 else float(value)
+    m = _ISO_RE.match(str(value).strip())
+    if not m:
+        return None
+    base, frac, tz = m.groups()
+    dt = datetime.fromisoformat(base.replace(" ", "T")).replace(tzinfo=timezone.utc)
+    if tz and tz != "Z":
+        sign = 1 if tz[0] == "+" else -1
+        dt -= sign * timedelta(hours=int(tz[1:3]), minutes=int(tz[-2:]))
+    return dt.timestamp() + (float(frac) if frac else 0.0)
 
 
 def strip_rarity(name: str) -> str:
@@ -73,6 +92,9 @@ class Listing:
     # Сколько получит продавец, если лот продастся по этой цене, TON
     seller_net: float
     raw: dict = field(default_factory=dict, repr=False, compare=False)
+    # Когда лот выставили / сменили цену (по часам биржи) и когда его увидел бот, unix-время
+    event_at: float | None = field(default=None, compare=False)
+    seen_at: float | None = field(default=None, compare=False)
 
     @property
     def key(self) -> GiftKey:

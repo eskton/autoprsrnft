@@ -21,6 +21,8 @@ APPS: dict[str, tuple[str, str | None]] = {
 
 # initData живёт ограниченное время; обновляем заранее
 INIT_DATA_TTL = 30 * 60
+# Фоновое обновление: раньше, чем истечёт старый, чтобы ни один запрос не ждал Telegram
+REFRESH_EVERY = 20 * 60
 
 
 def extract_init_data(url: str) -> str:
@@ -61,6 +63,21 @@ class TelegramAuth:
             self._cache[market] = (data, time.monotonic())
             log.info("Получен новый initData для %s", market)
             return data
+
+    async def refresh(self, market: str) -> None:
+        """Получает новый initData заранее. Пока он запрашивается, запросы берут старый из кеша."""
+        async with self._lock:
+            data = await self._request(market)
+            self._cache[market] = (data, time.monotonic())
+
+    async def keep_fresh(self, markets: list[str], every: float = REFRESH_EVERY) -> None:
+        while True:
+            await asyncio.sleep(every)
+            for market in markets:
+                try:
+                    await self.refresh(market)
+                except Exception as e:
+                    log.warning("Не удалось заранее обновить initData для %s: %s", market, e)
 
     async def _request(self, market: str) -> str:
         username, short_name = APPS[market]
